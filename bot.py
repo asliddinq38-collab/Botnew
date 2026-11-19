@@ -1614,7 +1614,7 @@ async def other_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODELS = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash")  # GEMINI_MODEL berilsa, faqat shu ishlatiladi
+GEMINI_MODELS = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite")  # GEMINI_MODEL berilsa, faqat shu ishlatiladi
 GEMINI_MIN_GAP = 6.5  # bepul limit (daqiqasiga ~10 so'rov) oshib ketmasligi uchun so'rovlar orasidagi pauza
 GEN_DAILY_LIMIT = 5  # bitta foydalanuvchi bir kunda nechta slayd/referat olishi mumkin (egasi uchun cheklov yo'q)
 GEN_SIZES = {"slide": (5, 10, 15), "essay": (5, 10, 15)}  # slaydlar soni / referat betlari soni
@@ -1629,6 +1629,10 @@ _gemini_last = [0.0]
 
 class AIError(Exception):
     """Sun'iy intellekt javob bera olmadi (foydalanuvchiga ko'rsatiladigan matn bilan)."""
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__(message)
+        self.detail = detail  # texnik tafsilot: faqat bot egasiga ko'rsatiladi
 
 
 def ai_key_status() -> str:
@@ -1653,10 +1657,11 @@ def _gemini_sync(prompt: str, json_mode: bool) -> str:
     body = json.dumps(
         {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
     ).encode()
+    details = []  # har bir model bo'yicha nima bo'lgani (egasi uchun)
     busy = False
     for model in models:
         url = f"{GEMINI_BASE}/models/{model}:generateContent"
-        for attempt in range(3):
+        for attempt in range(2):
             req = urllib.request.Request(
                 url, data=body, method="POST",
                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
@@ -1665,31 +1670,48 @@ def _gemini_sync(prompt: str, json_mode: bool) -> str:
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                snippet = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
+                details.append(f"{model}: {e.code} {snippet}")
+                logger.warning("Gemini %s: HTTP %s %s", model, e.code, snippet)
                 if e.code == 404:
                     break  # bu model yo'q: keyingisini sinaymiz
-                if e.code in (429, 500, 502, 503, 504):
+                if e.code == 429:
                     busy = True
-                    if attempt < 2:
-                        time.sleep(8 * (attempt + 1))
-                    continue
+                    break  # har bir modelning limiti alohida: darrov keyingisiga o'tamiz
+                if e.code in (500, 502, 503, 504):
+                    busy = True
+                    if attempt == 0:
+                        time.sleep(5)
+                        continue
+                    break
                 if e.code in (400, 401, 403):
-                    logger.error("Gemini rad etdi (%s): %s", e.code, e.read()[:300])
-                    raise AIError("AI kaliti noto'g'ri yoki ruxsat yo'q. Bot egasiga xabar bering.")
-                raise AIError("AI xizmatida xatolik. Keyinroq urinib ko'ring.")
-            except (urllib.error.URLError, TimeoutError, OSError):
+                    raise AIError(
+                        "AI kaliti noto'g'ri yoki ruxsat yo'q. Bot egasiga xabar bering.",
+                        "; ".join(details),
+                    )
+                break
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
                 busy = True
-                continue
+                details.append(f"{model}: ulanish xatosi {type(e).__name__}")
+                logger.warning("Gemini %s: ulanish xatosi %r", model, e)
+                break
             try:
                 cand = data["candidates"][0]
                 text = "".join(p.get("text", "") for p in cand["content"]["parts"])
             except (KeyError, IndexError, TypeError):
-                raise AIError("AI bu mavzuga javob bermadi. Mavzuni boshqacha yozib ko'ring.")
+                raise AIError(
+                    "AI bu mavzuga javob bermadi. Mavzuni boshqacha yozib ko'ring.",
+                    f"{model}: javobda matn yo'q: {str(data)[:200]}",
+                )
             if not text.strip():
-                raise AIError("AI bo'sh javob qaytardi. Qayta urinib ko'ring.")
+                raise AIError("AI bo'sh javob qaytardi. Qayta urinib ko'ring.", f"{model}: bo'sh matn")
             return text
     if busy:
-        raise AIError("AI xizmati band yoki bepul limit tugadi. Birozdan keyin urinib ko'ring.")
-    raise AIError("AI modeli topilmadi. Bot egasiga xabar bering.")
+        raise AIError(
+            "AI xizmati band yoki bepul limit tugadi. Birozdan keyin urinib ko'ring.",
+            "; ".join(details),
+        )
+    raise AIError("AI modeli topilmadi. Bot egasiga xabar bering.", "; ".join(details))
 
 
 async def ask_ai(prompt: str, json_mode: bool = False) -> str:
@@ -2031,7 +2053,10 @@ async def gen_generate(msg, context: ContextTypes.DEFAULT_TYPE, topic: str) -> N
         await msg.reply_document(io.BytesIO(blob), filename=filename, caption=caption, reply_markup=KEYBOARD)
         bot_data["gen_usage"][user_id] = (_today_key(), _gen_used(bot_data, user_id) + 1)
     except AIError as e:
-        await msg.reply_text(str(e), reply_markup=KEYBOARD)
+        text = str(e)
+        if user_id == owner and e.detail:
+            text += "\n\n[Faqat egasiga ko'rinadi]\n" + e.detail[:800]
+        await msg.reply_text(text, reply_markup=KEYBOARD)
     except ImportError:
         logger.exception("python-pptx / python-docx o'rnatilmagan")
         await msg.reply_text(
