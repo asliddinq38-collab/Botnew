@@ -1631,8 +1631,16 @@ class AIError(Exception):
     """Sun'iy intellekt javob bera olmadi (foydalanuvchiga ko'rsatiladigan matn bilan)."""
 
 
+def ai_key_status() -> str:
+    """"ok", "missing" (kalit yo'q) yoki "bad" (kalit o'rniga boshqa narsa yozilgan)."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
+        return "missing"
+    return "ok" if re.fullmatch(r"[A-Za-z0-9_.\-]{20,200}", key) else "bad"
+
+
 def ai_enabled() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    return ai_key_status() == "ok"
 
 
 def _gemini_sync(prompt: str, json_mode: bool) -> str:
@@ -1931,11 +1939,16 @@ def _gen_kind_markup() -> InlineKeyboardMarkup:
 async def gen_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     context.user_data.pop("gen", None)
-    if not ai_enabled():
-        await msg.reply_text(
-            "Bu funksiya hali yoqilmagan: bot egasi Render'da GEMINI_API_KEY ni qo'shishi kerak.",
-            reply_markup=KEYBOARD,
-        )
+    status = ai_key_status()
+    if status != "ok":
+        if status == "bad":
+            text = (
+                "GEMINI_API_KEY noto'g'ri yozilgan: qiymatida kalit o'rniga boshqa matn (masalan, kod) turibdi. "
+                "Render'da uni o'chirib, aistudio.google.com dagi kalitning o'zini (AIza... yoki AQ.... ko'rinishida, bitta qatorda) qo'ying."
+            )
+        else:
+            text = "Bu funksiya hali yoqilmagan: bot egasi Render'da GEMINI_API_KEY ni qo'shishi kerak."
+        await msg.reply_text(text, reply_markup=KEYBOARD)
         return
     await msg.reply_text(
         "Nimani tayyorlay? Matnni sun'iy intellekt yozadi.", reply_markup=_gen_kind_markup()
