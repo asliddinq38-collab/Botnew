@@ -1,0 +1,4 @@
+python-telegram-bot[webhooks]>=21
+Pillow
+python-pptx
+python-docx
