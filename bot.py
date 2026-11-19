@@ -1620,6 +1620,8 @@ GEN_DAILY_LIMIT = 5  # bitta foydalanuvchi bir kunda nechta slayd/referat olishi
 GEN_SIZES = {"slide": (5, 10, 15), "essay": (5, 10, 15)}  # slaydlar soni / referat betlari soni
 GEN_LANGS = {"uz": "Uzbek (Latin script)", "ru": "Russian", "en": "English"}
 GEN_LANG_BUTTONS = {"uz": "🇺🇿 O'zbekcha", "ru": "🇷🇺 Ruscha", "en": "🇬🇧 Inglizcha"}
+GEN_SLIDE_TIMEOUT = 300  # soniya: shundan ko'p kutilsa, so'rov to'xtatiladi
+GEN_ESSAY_TIMEOUT = 900
 GEN_TOPIC_MINUTES = 15  # mavzu yozish uchun beriladigan vaqt
 WORDS_PER_PAGE = 280
 
@@ -1667,7 +1669,7 @@ def _gemini_sync(prompt: str, json_mode: bool) -> str:
                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
             )
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=60 if json_mode else 100) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 snippet = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
@@ -2042,16 +2044,22 @@ async def gen_generate(msg, context: ContextTypes.DEFAULT_TYPE, topic: str) -> N
                 pass  # xabar tahrirlanmasa ham ish davom etadi
 
         if kind == "slide":
-            data = await ai_slides(topic, n, lang)
+            data = await asyncio.wait_for(ai_slides(topic, n, lang), GEN_SLIDE_TIMEOUT)
             blob = await asyncio.to_thread(build_pptx, data)
             filename, caption = _gen_filename(topic, "pptx"), f"📊 Slayd tayyor: {len(data['slides'])} ta slayd."
         else:
-            data = await ai_essay(topic, n, lang, progress)
+            data = await asyncio.wait_for(ai_essay(topic, n, lang, progress), GEN_ESSAY_TIMEOUT)
             blob = await asyncio.to_thread(build_docx, data)
             filename, caption = _gen_filename(topic, "docx"), "📝 Referat tayyor."
         caption += "\n⚠️ Matnni sun'iy intellekt yozdi: faktlar va sanalarni tekshirib, o'zingizcha tahrir qiling."
         await msg.reply_document(io.BytesIO(blob), filename=filename, caption=caption, reply_markup=KEYBOARD)
         bot_data["gen_usage"][user_id] = (_today_key(), _gen_used(bot_data, user_id) + 1)
+    except asyncio.TimeoutError:
+        logger.warning("Slayd/referat: AI juda sekin javob berdi")
+        await msg.reply_text(
+            "AI juda sekin javob berdi, so'rov to'xtatildi. Birozdan keyin qayta urinib ko'ring.",
+            reply_markup=KEYBOARD,
+        )
     except AIError as e:
         text = str(e)
         if user_id == owner and e.detail:
